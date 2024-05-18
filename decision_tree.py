@@ -16,64 +16,53 @@ parser.add_argument("--seed", default=42, type=int, help="Náhodný seed")
 parser.add_argument("--test_size", default=0.25, type=float, help="Velikost testovací množiny")
 
 def entropy(target):
-    #calculate entropy criterion
-    _sum = 0
-    for i in set(target):
-        p = sum(target == i) / len(target)
-        _sum += p * np.log2(p)
-    
-    return -len(target) * _sum
+    _, counts = np.unique(target, return_counts=True)
+    probabilities = counts / len(target)
+    return - len(target) * np.sum(probabilities * np.log2(probabilities))
 
 def squared_error(pred, target):
-    #calculate squared error criterion
-    _sum = 0
-    for i in range(len(target)):
-        _sum += (target[i] - pred) ** 2
-    return _sum
+    return np.sum((target - pred) ** 2)
 
 class Node:
     def __init__(self, data, target, depth):
-        self.data = data
-        self.target = target
+        self.data = np.array(data)
+        self.target = np.array(target)
         self.depth = depth
         self.delta_c = float('-inf')
         self.feature = None
         self.threshold = None
+        self.left_data = None
+        self.right_data = None
+        self.left_target = None
+        self.right_target = None
         self.left = None
         self.right = None
 
         if args.dataset == 'wine':
-            self.value = max(set(target), key=target.count)
+            values, counts = np.unique(self.target, return_counts=True)
+            self.value = values[np.argmax(counts)]
         else:
-            self.value = np.mean(target)
+            self.value = np.mean(self.target)
         
-        #find best split
-        #loop through features
-        for feature in range(len(self.data[0])):
-            thresholds = []
-            #sort based on feature
-            sorted_data = sorted(self.data, key=lambda x: x[feature])
-            #loop through sorted data and find thresholds as average of two unique consecutive values
-            for i in range(len(sorted_data)-1):
-                if sorted_data[i][feature] != sorted_data[i+1][feature]:
-                    thresholds.append((sorted_data[i][feature] + sorted_data[i+1][feature]) / 2)
-            
-            #loop through thresholds
-            for t in thresholds:
-                #split into two sons
-                left_data = []
-                right_data = []
-                left_target = []
-                right_target = []
-                for i in range(len(self.data)):
-                    if self.data[i][feature] < t:
-                        left_data.append(self.data[i])
-                        left_target.append(self.target[i])
-                    else:
-                        right_data.append(self.data[i])
-                        right_target.append(self.target[i])
+        # Find best split
+        n_samples, n_features = self.data.shape
+        for feature in range(n_features):
+            sorted_indices = np.argsort(self.data[:, feature])
+            sorted_data = self.data[sorted_indices]
+            sorted_target = self.target[sorted_indices]
 
-                #calculate delta_c
+            for i in range(1, n_samples):
+                if sorted_data[i, feature] == sorted_data[i-1, feature]:
+                    continue
+
+                threshold = (sorted_data[i, feature] + sorted_data[i - 1, feature]) / 2
+                left_mask = self.data[:, feature] < threshold
+                right_mask = ~left_mask
+                left_target, right_target = self.target[left_mask], self.target[right_mask]
+
+                if len(left_target) == 0 or len(right_target) == 0:
+                    continue
+
                 if args.dataset == 'wine':
                     left_c = entropy(left_target)
                     right_c = entropy(right_target)
@@ -81,101 +70,125 @@ class Node:
                 else:
                     left_c = squared_error(np.mean(left_target), left_target)
                     right_c = squared_error(np.mean(right_target), right_target)
-                    c = squared_error(self.value, self.target)
+                    c = squared_error(np.mean(self.target), self.target)
 
-                delta_c = left_c + right_c - c
-                #if delta_c is bigger than current best, update best split
+                delta_c = c - (left_c * len(left_target) + right_c * len(right_target)) / n_samples
                 if delta_c > self.delta_c:
                     self.delta_c = delta_c
                     self.feature = feature
-                    self.threshold = t
+                    self.threshold = threshold
+                    self.left_data = self.data[left_mask]
+                    self.right_data = self.data[right_mask]
+                    self.left_target = left_target
+                    self.right_target = right_target
 
     def split(self):
-        #split data
-        left_data = []
-        right_data = []
-        left_target = []
-        right_target = []
-        for i in range(len(self.data)):
-            if self.data[i][self.feature] < self.threshold:
-                left_data.append(self.data[i])
-                left_target.append(self.target[i])
-            else:
-                right_data.append(self.data[i])
-                right_target.append(self.target[i])
-
-        #create sons
-        self.left = Node(left_data, left_target, self.depth + 1)
-        self.right = Node(right_data, right_target, self.depth + 1)
-
-        return self.left, self.right
+        left_node = Node(self.left_data, self.left_target, self.depth + 1)
+        right_node = Node(self.right_data, self.right_target, self.depth + 1)
+        self.left = left_node
+        self.right = right_node
+        return left_node, right_node
 
 def recursive_split(current):
-    if((args.max_depth is not None and current.depth >= args.max_depth) or (args.min_to_split is not None and len(current.data) < args.min_to_split)):
+    if (args.max_depth is not None and current.depth >= args.max_depth) or (args.min_to_split is not None and len(current.data) < args.min_to_split) or current.delta_c == 0:
         return
-    
     left, right = current.split()
+    if left and right:
+        recursive_split(left)
+        recursive_split(right)
 
-    recursive_split(left)
-    recursive_split(right)
-
-def main(args: argparse.Namespace):
-    data, target = getattr(sklearn.datasets, "load_{}".format(args.dataset))(return_X_y=True)
-
-    train_data, test_data, train_target, test_target = train_test_split(data, target, test_size=args.test_size, random_state=args.seed)
-    
-    #training
+def build_tree(train_data, train_target):
     root = Node(train_data, train_target, 0)
-
-    if(args.max_leaves is None):
+    if args.max_leaves is None:
         recursive_split(root)
     else:
         pq = PriorityQueue()
-        #push root to priority queue
         pq.put((-root.delta_c, root))
-        leaves_left = args.max_leaves
-        while(leaves_left > 0):
-            current = pq.get()[1]
-            left, right = current.split()
+        leaves = 1
+        while not pq.empty():
+            delta_c, node = pq.get()
+            if leaves >= args.max_leaves or (args.max_depth is not None and node.depth >= args.max_depth) or (args.min_to_split is not None and len(node.data) < args.min_to_split) or node.delta_c == 0:
+                break
+            left, right = node.split()
             pq.put((-left.delta_c, left))
             pq.put((-right.delta_c, right))
-            leaves_left -= 1 #remove one leaf (current) and add two new leaves
-        
-    #predicting
-    pred_train = []
-    #for each data, traverse the tree
-    for i in range(len(train_data)):
-        current = root
-        #while it has children, go to the correct one
-        while(current.left is not None):
-            if(train_data[i][current.feature] < current.threshold):
-                current = current.left
-            else:
-                current = current.right
-        #add the prediction to the list
-        pred_train.append(current.value)
+            leaves += 1
+    return root
 
-    pred_test = []
-    #for each data, traverse the tree
-    for i in range(len(test_data)):
-        current = root
-        #while it has children, go to the correct one
-        while(current.left is not None):
-            if(train_data[i][current.feature] < current.threshold):
-                current = current.left
-            else:
-                current = current.right
-        #add the prediction to the list
-        pred_test.append(current.value)
+def predict(node, data):
+    if node.left is None or node.right is None:
+        return node.value
+    if data[node.feature] < node.threshold:
+        return predict(node.left, data)
+    else:
+        return predict(node.right, data)
+
+def main(args: argparse.Namespace):
+    # Načtení datasetu.
+    data, target = getattr(sklearn.datasets, "load_{}".format(args.dataset))(return_X_y=True)
+
+    # TODO: Rozdělte dataset na trénovací a testovací část, funkci z knihovny sklearn
+    # předejte argumenty `test_size=args.test_size, random_state=args.seed`.
+    train_data, test_data, train_target, test_target = train_test_split(data, target, test_size=args.test_size, random_state=args.seed)
+
+    # TODO: Implementace binárního rozhodovacího stromu
+    #
+    # - Budete implementovat strom pro klasifikaci i regresi podle typu
+    #   datasetu. `wine` dataset je pro klasifikaci a `diabetes` pro regresi.
+    #
+    # - Pro klasifikaci: Pro každý list predikujte třídu, která je nejčastější
+    #   (a pokud je těchto tříd několik, vyberte tu s nejmenším číslem).
+    # - Pro regresi: Pro každý list predikujte průměr target (cílových) hodnot.
+    #    
+    # - Pro klasifikaci použijte jako kritérium entropy kritérium a pro regresi
+    #   použijte jako kritérium SE (squared error).
+    #
+    # - Pro rozdělení vrcholu vyzkoušejte postupně všechny featury. Pro každou
+    #   featuru vyzkoušejte všechna možná místa na rozdělení seřazená vzestupně
+    #   a rozdělte vrchol na místě, který nejvíce sníží kritérium.
+    #   Pokud existuje takových míst několik, vyberte první z nich.
+    #   Každé možné místo na rozdělení je průměrem dvou nejbližších unikátních hodnot
+    #   featur z dat odpovídající danému vrcholu.
+    #   Např. pro čtyři data s hodnotami featur 1, 7, 3, 3 jsou místa na rozdělení 2 a 5.
+    #
+    # - Rozdělení vrcholu povolte pouze pokud:
+    #   - pokud hloubka vrcholu je menší než `args.max_depth`
+    #     (hloubka kořenu je nula). Pokud `args.max_depth` je `None`,
+    #     neomezujte hloubku stromu.
+    #   - pokud je méně než `args.max_leaves` listů ve stromě
+    #     (list je vrchol stromu bez synů). Pokud `args.max_leaves` je `None`,
+    #     neomezujte počet listů.
+    #   - je alespoň `args.min_to_split` dat v daném vrcholu.
+    #   - hodnota kritéria není nulová.
+    #
+    # - Pokud `args.max_leaves` není `None`: opakovaně rozdělujte listové vrcholy,
+    #   které splňují podmínky na rozdělení vrcholu a celková hodnota kritéria
+    #   ($c_{levý syn} + c_{pravý syn} - c_{rodič}$) nejvíce klesne.
+    #   Pokud je několik takových vrcholů, vyberte ten, který byl vytvořen dříve
+    #   (levý syn je považován, že je vytvořený dříve než pravý syn).
+    #
+    #   Pokud `args.max_leaves` je `None`, použijte rekurzivní přístup (nejdříve rozdělujte
+    #   levé syny, poté pravé syny) a rozdělte každý vrchol, který splňuje podmínky.
+    #   Tento rekurzivní přístup není důležitý v této úloze, ale až v nasledující
+    #   úloze - Random Forest.
+    #
+    # - Nakonec vypočítejte trénovací a testovací chybu
+    #   - RMSE, root mean squared error, pro regresi
+    #   - accuracy pro klasifikaci
+    
+    root = build_tree(train_data, train_target)
+    
+    train_predictions = [predict(root, x) for x in train_data]
+    test_predictions = [predict(root, x) for x in test_data]
 
     if args.dataset == 'diabetes':
-        train_rmse = mean_squared_error(train_target, pred_train)
-        test_rmse = mean_squared_error(test_target, pred_test)
+        train_rmse = mean_squared_error(train_target, train_predictions, squared=False)
+        test_rmse = mean_squared_error(test_target, test_predictions, squared = False)
         print("Train RMSE: {:.5f}".format(train_rmse))
         print("Test RMSE: {:.5f}".format(test_rmse))
     else:
-        train_accuracy = accuracy_score(train_target, pred_train)
-        test_accuracy = accuracy_score(test_target, pred_test)
+        train_accuracy = accuracy_score(train_target, train_predictions)
+        test_accuracy = accuracy_score(test_target, test_predictions)
         print("Train accuracy: {:.1f}%".format(100 * train_accuracy))
         print("Test accuracy: {:.1f}%".format(100 * test_accuracy))
 
